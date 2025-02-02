@@ -14,3 +14,8 @@ Start project:
 ```bash
 npm start
 ```
+
+Keypoints to notes mapping:
+![screenshot](public/Wrist%20notes.jpeg)
+
+To select a note, tap the tip of your thumb on one of the note-keypoints.
