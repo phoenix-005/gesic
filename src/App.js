@@ -1,10 +1,10 @@
 import React from "react";
-import WebcamDisplay from "./WebcamDisplay";
+import HandMusicVisualizer from "./components/HandMusicVisualizer";
 
 function App() {
   return (
     <div>
-      <WebcamDisplay />
+      <HandMusicVisualizer />
     </div>
   );
 }
