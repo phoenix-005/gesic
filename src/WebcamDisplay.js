@@ -6,21 +6,70 @@ import * as Tone from "tone"; // Import Tone.js for music
 
 const WebcamDisplay = () => {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null); // Hidden canvas used for hand detection
+  const canvasRef = useRef(null); // Hidden canvas for hand detection
   const streakCanvasRef = useRef(null); // Overlay canvas for animated strokes
 
-  // We'll store separate trails for the left and right index fingers.
+  // Store separate trails for left and right index fingers.
   const trail = useRef({ Left: [], Right: [] });
+  // Store the last note trigger times for each hand.
+  const lastNoteTime = useRef({ Left: 0, Right: 0 });
+
   const [detector, setDetector] = useState(null);
 
-  // Initialize Tone.js Synth (still available if needed)
-  const synth = useRef(new Tone.Synth().toDestination());
+  // Create separate synths for left and right hands.
+  // Replace the default synths with synthesized "violin" sounds:
+  const leftSynth = useRef(
+    new Tone.FMSynth({
+      harmonicity: 1.5,
+      modulationIndex: 12,
+      oscillator: { type: "sawtooth" },
+      envelope: {
+        attack: 1.2,
+        decay: 0.3,
+        sustain: 0.6,
+        release: 1.8,
+      },
+      modulation: { type: "sine" },
+      modulationEnvelope: {
+        attack: 1.2,
+        decay: 0.3,
+        sustain: 0.6,
+        release: 1.8,
+      },
+    })
+      .toDestination()
+      // Optionally add a bit of reverb to enhance the sound:
+      .chain(new Tone.Reverb({ decay: 4, preDelay: 0.01 }).toDestination())
+  );
+  
+  const rightSynth = useRef(
+    new Tone.FMSynth({
+      harmonicity: 1.5,
+      modulationIndex: 12,
+      oscillator: { type: "sawtooth" },
+      envelope: {
+        attack: 1.2,
+        decay: 0.3,
+        sustain: 0.6,
+        release: 1.8,
+      },
+      modulation: { type: "sine" },
+      modulationEnvelope: {
+        attack: 1.2,
+        decay: 0.3,
+        sustain: 0.6,
+        release: 1.8,
+      },
+    })
+      .toDestination()
+      .chain(new Tone.Reverb({ decay: 4, preDelay: 0.01 }).toDestination())
+  );
 
   useEffect(() => {
     const startWebcam = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
+          video: {   
             width: { ideal: 1280 },
             height: { ideal: 720 },
             facingMode: "user",
@@ -64,22 +113,13 @@ const WebcamDisplay = () => {
     loadHandPose();
   }, []);
 
-  const mapPositionToNote = (y) => {
-    const notes = [
-      "C6", "C4#", "D6", "E6", "F6", "G4", "A4", "B4",
-      "C5", "D5", "E5", "F5", "G5", "A5", "B5",
-    ];
-    const index = Math.floor((y / window.innerHeight) * notes.length);
-    return notes[Math.min(index, notes.length - 1)];
-  };
-
   useEffect(() => {
     if (!detector) return;
 
     const detectPose = async () => {
       try {
         if (videoRef.current && videoRef.current.readyState === 4) {
-          // --- Hand Detection using the hidden canvas ---
+          // --- Hand Detection using the hidden canvas (intrinsic video resolution) ---
           const detectionCanvas = canvasRef.current;
           const dCtx = detectionCanvas.getContext("2d");
           detectionCanvas.width = videoRef.current.videoWidth;
@@ -96,29 +136,31 @@ const WebcamDisplay = () => {
             flipHorizontal: true,
           });
 
-          // --- Determine displayed video dimensions & compute scale ---
+          // --- Determine displayed video dimensions & compute scale for "cover" mode ---
           const videoRect = videoRef.current.getBoundingClientRect();
           const videoClientWidth = videoRect.width;
           const videoClientHeight = videoRect.height;
+          // Using objectFit "cover": scale by the larger factor.
           const scale = Math.max(
             videoClientWidth / videoRef.current.videoWidth,
             videoClientHeight / videoRef.current.videoHeight
           );
           const displayedWidth = videoRef.current.videoWidth * scale;
           const displayedHeight = videoRef.current.videoHeight * scale;
+          // Calculate cropping offsets.
           const offsetX = (displayedWidth - videoClientWidth) / 2;
           const offsetY = (displayedHeight - videoClientHeight) / 2;
 
           const now = Date.now();
-          const trailLifetime = 1000; // Trail lifetime in milliseconds
+          const trailLifetime = 1000; // Trail lasts for 1 second
 
-          // --- Update trails for each detected hand ---
+          // Process each detected hand.
           hands.forEach((hand) => {
             const indexFingerTip = hand.keypoints.find(
               (k) => k.name === "index_finger_tip"
             );
             if (indexFingerTip) {
-              // Map the detected keypoint to the overlay canvas coordinates.
+              // Map the detected keypoint to overlay canvas coordinates.
               const scaledX = indexFingerTip.x * scale - offsetX;
               const scaledY = indexFingerTip.y * scale - offsetY;
               const handLabel = hand.handedness; // "Left" or "Right"
@@ -126,17 +168,47 @@ const WebcamDisplay = () => {
                 trail.current[handLabel] = [];
               }
               trail.current[handLabel].push({ x: scaledX, y: scaledY, t: now });
-
-              // const note = mapPositionToNote(indexFingerTip.y);
-              // synth.current.triggerAttackRelease(note, "8n");
             }
           });
 
-          // --- Remove old trail points ---
+          // Remove trail points older than trailLifetime.
           Object.keys(trail.current).forEach((handLabel) => {
             trail.current[handLabel] = trail.current[handLabel].filter(
               (p) => now - p.t < trailLifetime
             );
+          });
+
+          // --- Music Triggering Based on Movement Distance ---
+          // Define parameters:
+          const thresholdDistance = 10; // Minimum distance (in pixels) to trigger a note.
+          const noteInterval = 100; // Minimum time (ms) between note triggers.
+          const maxDistance = 50; // Distance at which full velocity (1.0) is reached.
+
+          Object.keys(trail.current).forEach((handLabel) => {
+            const points = trail.current[handLabel];
+            if (points && points.length >= 2) {
+              const lastPoint = points[points.length - 1];
+              const prevPoint = points[points.length - 2];
+              const dx = lastPoint.x - prevPoint.x;
+              const dy = lastPoint.y - prevPoint.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              // Only trigger a note if the finger has moved more than the threshold distance
+              // and enough time has passed since the last note.
+              if (
+                dist > thresholdDistance &&
+                now - lastNoteTime.current[handLabel] > noteInterval
+              ) {
+                // Map the movement distance to note velocity (volume).
+                const velocity = Math.min(dist / maxDistance, 1);
+                // Left hand always plays F5; right hand always plays C5.
+                if (handLabel === "Left") {
+                  leftSynth.current.triggerAttackRelease("F5", "8n", undefined, velocity);
+                } else if (handLabel === "Right") {
+                  rightSynth.current.triggerAttackRelease("C5", "8n", undefined, velocity);
+                }
+                lastNoteTime.current[handLabel] = now;
+              }
+            }
           });
 
           // --- Draw the animated brush-like strokes on the overlay canvas ---
@@ -146,10 +218,11 @@ const WebcamDisplay = () => {
             overlayCanvas.height = videoClientHeight;
             const aCtx = overlayCanvas.getContext("2d");
 
+            // Fade previous drawings for a trailing effect.
             aCtx.fillStyle = "rgba(0, 0, 0, 0.1)";
             aCtx.fillRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-            // Draw a stroke for each hand's trail.
+            // Draw strokes for each hand.
             Object.keys(trail.current).forEach((handLabel) => {
               const points = trail.current[handLabel];
               if (points && points.length > 1) {
@@ -158,7 +231,6 @@ const WebcamDisplay = () => {
                 for (let i = 1; i < points.length; i++) {
                   aCtx.lineTo(points[i].x, points[i].y);
                 }
-                // Set brush properties.
                 aCtx.lineCap = "round";
                 aCtx.lineJoin = "round";
                 aCtx.lineWidth = 8;
@@ -195,6 +267,7 @@ const WebcamDisplay = () => {
   }, [detector]);
 
   return (
+    // Outer container: full viewport with a black background.
     <div
       style={{
         display: "flex",
@@ -204,6 +277,7 @@ const WebcamDisplay = () => {
         backgroundColor: "#000",
       }}
     >
+      {/* Video container covering 90% of the viewport */}
       <div style={{ position: "relative", width: "90vw", height: "90vh" }}>
         <video
           ref={videoRef}
@@ -218,6 +292,7 @@ const WebcamDisplay = () => {
             transform: "scaleX(-1)", // Mirror the video horizontally
           }}
         ></video>
+        {/* Overlay canvas that exactly covers the video */}
         <canvas
           ref={streakCanvasRef}
           style={{
@@ -229,6 +304,7 @@ const WebcamDisplay = () => {
             pointerEvents: "none",
           }}
         />
+        {/* Hidden canvas used for hand detection */}
         <canvas ref={canvasRef} style={{ display: "none" }} />
       </div>
     </div>
